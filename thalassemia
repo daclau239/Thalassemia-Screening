@@ -1,0 +1,381 @@
+import io
+import os
+import json
+import uuid
+from datetime import date, datetime
+
+import pandas as pd
+import streamlit as st
+from docx import Document
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Cm, Pt
+from supabase import create_client, Client
+
+ADMIN_PASSWORD = "admin123"
+
+st.set_page_config(
+    page_title="Sàng lọc Thalassemia",
+    page_icon="🩸",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Kết nối Supabase
+@st.cache_resource
+def init_supabase() -> Client:
+    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+supabase_client = init_supabase()
+
+CSS = """<style>
+.stApp { background: linear-gradient(180deg, #E6F4F8 0%, #F4F8FB 100%); }
+.block-container { padding-top: 1.2rem; padding-bottom: 3.5rem; max-width: 1180px; }
+header, footer, div[data-testid="stDecoration"] { display: none; }
+.hero { background: linear-gradient(135deg, #012A4A 0%, #014F86 50%, #0077B6 100%);
+        color: #fff; border-radius: 22px; padding: 26px 30px; margin-bottom: 16px; }
+.hero h1 { color: #fff !important; font-size: 28px !important; margin: 0 0 8px 0 !important; }
+.hero p { color: #D9F3FF; font-size: 15px; margin: 0; line-height: 1.6; }
+.stButton > button { background: linear-gradient(180deg, #0077B6, #014F86) !important;
+    color: #fff !important; border: 0 !important; border-radius: 12px !important;
+    font-weight: 700 !important; min-height: 3rem !important; }
+.info-box, .warning-box, .danger-box, .success-box {
+    padding: 14px 16px; border-radius: 14px; margin: 10px 0; line-height: 1.7; }
+.info-box { background: #E7F6FB; border-left: 6px solid #0077B6; }
+.warning-box { background: #FFF6E8; border-left: 6px solid #F4A261; }
+.danger-box { background: #FDECEC; border-left: 6px solid #D62828; }
+.success-box { background: #E9F7EF; border-left: 6px solid #2A9D8F; }
+.hospital-box { 
+    background-color: #FFFFFF; border: 1px solid #BEE3F8; 
+    border-left: 5px solid #0077B6; border-radius: 10px; 
+    padding: 12px 14px; margin-bottom: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+}
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
+
+def box(kind, text):
+    st.markdown(f'<div class="{kind}">{text}</div>', unsafe_allow_html=True)
+
+VUNG_MIEN = [
+    "Chọn vùng/miền", "Đông Bắc", "Tây Bắc", "Đồng bằng sông Hồng",
+    "Bắc Trung Bộ", "Trung Trung Bộ", "Nam Trung Bộ", "Tây Nguyên",
+    "Đông Nam Bộ", "Đồng bằng sông Cửu Long"
+]
+
+TINH_THEO_VUNG = {
+    "Đông Bắc": ["Hà Giang", "Cao Bằng", "Bắc Kạn - Thái Nguyên", "Tuyên Quang", "Lạng Sơn", "Bắc Giang"],
+    "Tây Bắc": ["Điện Biên - Lai Châu", "Sơn La", "Hòa Bình", "Yên Bái"],
+    "Đồng bằng sông Hồng": ["Hà Nội", "Vĩnh Phúc - Phú Thọ", "Bắc Ninh - Hưng Yên", "Quảng Ninh", "Hải Dương", "Thái Bình", "Hải Phòng", "Nam Định - Ninh Bình", "Thanh Hóa"],
+    "Bắc Trung Bộ": ["Nghệ An", "Hà Tĩnh", "Quảng Bình", "Quảng Trị - Thừa Thiên Huế"],
+    "Trung Trung Bộ": ["Đà Nẵng", "Quảng Nam - Quảng Ngãi", "Bình Định", "Phú Yên"],
+    "Nam Trung Bộ": ["Khánh Hòa", "Ninh Thuận - Bình Thuận"],
+    "Tây Nguyên": ["Kon Tum", "Gia Lai", "Đắc Lắc", "Đắc Nông - Lâm Đồng"],
+    "Đông Nam Bộ": ["Bình Phước - Bình Dương", "Đồng Nai - Bà Rịa Vũng Tàu", "Tây Ninh - Long An", "Thành phố Hồ Chí Minh"],
+    "Đồng bằng sông Cửu Long": ["Tiền Giang - Vĩnh Long", "Bến Tre - Trà Vinh", "Đồng Tháp - An Giang", "Kiên Giang - Hậu Giang", "Cần Thơ", "Sóc Trăng - Bạc Liêu - Cà Mau"]
+}
+
+TAT_CA_TINH = ["Chọn Tỉnh/Thành phố"]
+for ds in TINH_THEO_VUNG.values():
+    TAT_CA_TINH.extend(ds)
+VUNG_CUA_TINH = {tinh: vung for vung, ds in TINH_THEO_VUNG.items() for tinh in ds}
+
+DAN_TOC = [
+    "Chọn dân tộc", "Stiêng", "Ê Đê", "Gia Rai", "Ba Na", "Xơ Đăng", "Cơ Ho",
+    "Hrê", "Chăm", "Khơ Me", "Thái", "Mường", "Tày", "Nùng", "Dao", "Sán Chay",
+    "Kinh", "Hoa", "Dân tộc khác"
+]
+DIEM_DAN_TOC_VN = {
+    "Stiêng": 3.0, "Ê Đê": 3.0, "Gia Rai": 3.0, "Ba Na": 2.5, "Xơ Đăng": 2.5,
+    "Cơ Ho": 2.5, "Hrê": 2.5, "Chăm": 2.0, "Khơ Me": 2.0, "Thái": 2.0,
+    "Mường": 2.0, "Tày": 1.5, "Nùng": 1.5, "Dao": 1.5, "Sán Chay": 1.5,
+    "Kinh": 0.5, "Hoa": 0.5, "Dân tộc khác": 0.5
+}
+
+NGHIEP_NHOM = [
+    "Chọn nghề nghiệp", "Nông nghiệp - Lâm nghiệp - Thủy sản",
+    "Lao động phổ thông / Công nhân", "Học sinh - Sinh viên",
+    "Cán bộ - Công chức - Viên chức", "Kinh doanh - Dịch vụ - Văn phòng",
+    "Y tế - Giáo dục - Kỹ thuật", "Nghỉ hưu / Nội trợ", "Khác"
+]
+
+ALTITUDE_OPTIONS = [
+    "Dưới 1.000m (Đồng bằng / Trung duy / Núi thấp)", "1.000m – 1.499m (-0.8 g/dL)",
+    "1.500m – 1.999m (-1.1 g/dL)", "2.000m – 2.499m (-1.4 g/dL)",
+    "2.500m – 2.999m (-1.8 g/dL)", "3.000m – 3.499m (-2.1 g/dL)",
+    "3.500m – 3.999m (-2.5 g/dL)", "4.000m – 4.499m (-2.9 g/dL)",
+    "Từ 4.500m trở lên (-3.3 g/dL)"
+]
+
+ALTITUDE_CORRECTION_MAP = {
+    "Dưới 1.000m (Đồng bằng / Trung duy / Núi thấp)": 0.0,
+    "1.000m – 1.499m (-0.8 g/dL)": 0.8, "1.500m – 1.999m (-1.1 g/dL)": 1.1,
+    "2.000m – 2.499m (-1.4 g/dL)": 1.4, "2.500m – 2.999m (-1.8 g/dL)": 1.8,
+    "3.000m – 3.499m (-2.1 g/dL)": 2.1, "3.500m – 3.999m (-2.5 g/dL)": 2.5,
+    "4.000m – 4.499m (-2.9 g/dL)": 2.9, "Từ 4.500m trở lên (-3.3 g/dL)": 3.3
+}
+
+CAU_HOI = [
+    "1. Bản thân hoặc người thân trong gia đình đã từng được chẩn đoán mắc bệnh Thalassemia / Thiếu máu truyền máu chưa?",
+    "2. Gia đình/dòng họ có ai bị biến dạng xương mặt, lách to, da vàng hoặc da sạm đen bất thường không?",
+    "3. Bản thân đã từng có tiền sử xét nghiệm ghi nhận thiếu máu nhược sắc, hồng cầu nhỏ hoặc nghi ngờ mang gen chưa?",
+    "4. Vợ/Chồng hoặc người chuẩn bị kết hôn có thuộc cùng dòng họ, cùng dân tộc ít người hoặc cùng thôn/bản không?",
+    "5. Vợ/Chồng hoặc bạn đời đã từng được xét nghiệm sàng lọc Thalassemia chưa?",
+    "6. Đã từng bị từ chối hiến máu do nồng độ Huyết sắc tố (Hb) thấp hoặc hồng cầu quá nhỏ chưa?",
+    "7. Bản thân thường xuyên có biểu hiện mệt mỏi, hoa mắt, chóng mặt, da xanh xao kéo dài không?",
+    "8. Đã từng thực hiện xét nghiệm Điện di Huyết sắc tố (Hb electrophoresis) hoặc xét nghiệm Gen Thalassemia chưa?",
+    "9. Kết quả xét nghiệm trước đây có ghi nhận biến thể Hb (như HbE, HbCS) hoặc mang gen dị hợp tử không?",
+    "10. Đã từng được bác sĩ chuyên khoa huyết học tư vấn về nguy cơ sinh con mắc bệnh Thalassemia thể nặng chưa?",
+    "11. Trong tiền sử gia đình có ghi nhận trường hợp sảy thai liên tiếp, thai chết lưu không rõ nguyên nhân hoặc phù thai không?",
+    "12. Nơi sinh sống hiện tại hoặc quê quán thuộc khu vực miền núi, vùng sâu vùng xa có tỷ lệ mang gen cao không?",
+    "13. Bố và Mẹ đẻ có phải là người cùng một dân tộc thiểu số không?",
+    "14. Bố hoặc Mẹ đẻ đã từng được xác định mang gen bệnh Thalassemia chưa?",
+    "15. Bạn có nhu cầu tư vấn di truyền trước hôn nhân hoặc trước khi sinh con không?"
+]
+
+def bv(ten, diachi, dt):
+    return {"ten": ten, "diachi": diachi, "dt": dt}
+
+BENH_VIEN = {
+    "Hà Giang": [bv("Bệnh viện Đa khoa Tỉnh Hà Giang", "185 Trần Hưng Đạo, TP. Hà Giang", "0219 3851 215")],
+    "Hà Nội": [bv("Viện Huyết học - Truyền máu TW", "Phố Phạm Văn Bạch, Cầu Giấy, Hà Nội", "024 3782 1895"), bv("Bệnh viện Bạch Mai", "78 Giải Phóng, Đống Đa, Hà Nội", "024 3869 3731")],
+    "Thành phố Hồ Chí Minh": [bv("Bệnh viện Truyền máu Huyết học TP.HCM", "1 Trần Hữu Trang, Q. Tân Bình", "028 3839 7535"), bv("Bệnh viện Chợ Rẫy", "201 Nguyễn Chí Thanh, Quận 5", "028 3855 4137")],
+}
+
+def lay_benh_vien_theo_tinh(tinh_tru):
+    if not tinh_tru or tinh_tru == "Chọn Tỉnh/Thành phố":
+        return []
+    if tinh_tru in BENH_VIEN:
+        return BENH_VIEN[tinh_tru]
+    vung_tru = VUNG_CUA_TINH.get(tinh_tru, "")
+    ds = []
+    for tinh, lst in BENH_VIEN.items():
+        if VUNG_CUA_TINH.get(tinh, "") == vung_tru:
+            ds.extend(lst)
+    return ds
+
+def classify_round1(s1):
+    if s1 <= 5: return ("Nguy cơ thấp", "Theo dõi sức khỏe định kỳ. Chưa cần làm công thức máu ngay.")
+    if s1 <= 12: return ("Nguy cơ trung bình", "Khuyến nghị làm công thức máu (CBC) tại cơ sở y tế gần nhất.")
+    return ("Nguy cơ cao", "Cần làm công thức máu và thực hiện xét nghiệm chuyên sâu Vòng 2 & 3.")
+
+def classify_total(s1, s2):
+    total = s1 + s2
+    if total >= 15: return ("Nguy cơ RẤT CAO", "Gửi mẫu điện di huyết sắc tố / Xét nghiệm gen ngay.")
+    if total >= 10 or s2 >= 4: return ("Nguy cơ CAO", "Thực hiện điện di huyết sắc tố. Tư vấn di truyền chi tiết.")
+    if total >= 6: return ("Nguy cơ TRUNG BÌNH", "Theo dõi, kiểm tra công thức máu lại sau 6 tháng.")
+    return "Nguy cơ THẤP", "Tư vấn sức khỏe sinh sản / theo dõi định kỳ."
+
+def score_round2(mcv, mch, hb_tho, rbc, rdw, gioitinh, do_cao_option):
+    giam_hb = ALTITUDE_CORRECTION_MAP.get(do_cao_option, 0.0)
+    hb_hieuchinh = hb_tho - giam_hb
+    hb_cut = 12.0 if gioitinh == "Nữ" else 13.0
+    score_mcv = 4 if (0 < mcv < 86.0) else 0
+    score_mch = 3 if (0 < mch < 27.0) else 0
+    score_hb = 2 if (0 < hb_hieuchinh < hb_cut) else 0
+    score_rbc = 2 if rbc >= 5.0 else 0
+    score_rdw = 2 if (11.0 <= rdw <= 15.0 and 0 < mcv < 86.0) else 0
+    
+    rows = [
+        ("MCV", f"{mcv:.2f} fL", "86.0 – 98.0 fL", score_mcv),
+        ("MCH", f"{mch:.2f} pg", "27.0 – 32.0 pg", score_mch),
+        ("Hemoglobin", f"{hb_hieuchinh:.2f} g/dL", f"< {hb_cut:.1f} g/dL ({gioitinh})", score_hb),
+        ("RBC", f"{rbc:.2f} M/uL", "4.30 – 5.80 M/uL", score_rbc),
+        ("RDW", f"{rdw:.2f} %", "11.0 – 15.0 %", score_rdw)
+    ]
+    return sum(r[3] for r in rows), rows, hb_hieuchinh
+
+def ghi_database_supabase(record_data):
+    if not supabase_client:
+        return False
+    try:
+        supabase_client.table("ho_so_thalassemia").upsert(record_data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi lưu cơ sở dữ liệu Supabase: {e}")
+        return False
+
+def doc_database_supabase():
+    if not supabase_client:
+        return []
+    try:
+        res = supabase_client.table("ho_so_thalassemia").select("*").order("created_at", desc=True).execute()
+        return res.data
+    except Exception as e:
+        st.error(f"Lỗi đọc dữ liệu Supabase: {e}")
+        return []
+
+def init_state():
+    defaults = {
+        "ho_so_id": "", "s1": 0.0, "s2": 0, "r2_detail": None,
+        "gioitinh": "Nữ", "hoten": "", "ngaysinh": date(2000, 1, 1),
+        "dantoc": "Chọn dân tộc", "vung_o": "Chọn vùng/miền", "vung_lamviec": "Chọn vùng/miền",
+        "tinh_o": "Chọn Tỉnh/Thành phố", "tinh_lamviec": "Chọn Tỉnh/Thành phố",
+        "nghenghiep": "Chọn nghề nghiệp", "sdt": "", "diachi": "", "do_cao": ALTITUDE_OPTIONS[0],
+        "kieu_hb": "", "hba": 0.0, "hba2": 0.0, "hbf": 0.0, "ketluan_r3": "",
+        "mcv": 0.0, "mch": 0.0, "hb": 0.0, "rbc": 0.0, "rdw": 0.0,
+        "vong1_da_luu": False, "vong2_da_luu": False, "vong3_da_luu": False,
+        "is_admin": False
+    }
+    for i in range(1, 16): defaults[f"q{i}"] = "Không"
+    for k, v in defaults.items():
+        if k not in st.session_state: st.session_state[k] = v
+
+def luu_thong_tin_khach_hang(vong=None):
+    ss = st.session_state
+    ho_ten = str(ss.get("hoten", "")).strip()
+    if not ho_ten:
+        st.warning("Vui lòng nhập Họ tên trước khi lưu!")
+        return False
+
+    if not ss.get("ho_so_id"): ss.ho_so_id = uuid.uuid4().hex
+    if vong == 1: ss.vong1_da_luu = True
+    elif vong == 2: ss.vong2_da_luu = True
+    elif vong == 3: ss.vong3_da_luu = True
+
+    cau_tra_loi_v1 = [{"stt": i, "cau_hoi": CAU_HOI[i - 1], "tra_loi": ss.get(f"q{i}", "Không")} for i in range(1, 16)]
+
+    record = {
+        "id": ss.ho_so_id,
+        "ho_ten": ho_ten,
+        "gioi_tinh": ss.get("gioitinh", "Nữ"),
+        "ngay_sinh": str(ss.get("ngaysinh")),
+        "dan_toc": ss.get("dantoc", ""),
+        "sdt": str(ss.get("sdt", "")).strip(),
+        "tinh_o": ss.get("tinh_o", ""),
+        "vung_o": ss.get("vung_o", ""),
+        "tinh_lam_viec": ss.get("tinh_lamviec", ""),
+        "vung_lam_viec": ss.get("vung_lamviec", ""),
+        "nghe_nghiep": ss.get("nghenghiep", ""),
+        "do_cao": ss.get("do_cao", ALTITUDE_OPTIONS[0]),
+        "diem_v1": ss.get("s1", 0.0) if ss.vong1_da_luu else None,
+        "ket_luan_v1": classify_round1(ss.get("s1", 0.0))[0] if ss.vong1_da_luu else "",
+        "diem_v2": ss.get("s2", 0) if ss.vong2_da_luu else None,
+        "ket_luan_tong": classify_total(ss.get("s1", 0.0), ss.get("s2", 0))[0] if ss.vong2_da_luu else "",
+        "mcv": ss.get("mcv", 0.0), "mch": ss.get("mch", 0.0), "hb": ss.get("hb", 0.0),
+        "rbc": ss.get("rbc", 0.0), "rdw": ss.get("rdw", 0.0),
+        "hba": ss.get("hba", 0.0), "hba2": ss.get("hba2", 0.0), "hbf": ss.get("hbf", 0.0),
+        "ket_luan_v3": ss.get("ketluan_r3", ""),
+        "chi_tiet_v1_json": json.dumps(cau_tra_loi_v1, ensure_ascii=False),
+        "updated_at": datetime.now().isoformat()
+    }
+
+    if supabase_client:
+        return ghi_database_supabase(record)
+    else:
+        st.info("⚠️ Chưa cấu hình Supabase Secrets. Dữ liệu chỉ được giữ tạm thời.")
+        return True
+
+def main():
+    init_state()
+    ss = st.session_state
+
+    st.markdown("""
+    <div class="hero">
+        <h1>🩸 SÀNG LỌC VÀ QUẢN LÝ HỒ SƠ THALASSEMIA</h1>
+        <p>Hệ thống tự động tính Hb hiệu chỉnh • Lưu trữ Đám mây Supabase vĩnh viễn • Xuất báo cáo Excel</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.sidebar:
+        st.title("⚙️ Bảng Điều Khiển")
+        if not ss.is_admin:
+            pwd = st.text_input("Mật khẩu Admin:", type="password")
+            if st.button("Đăng nhập Quản trị"):
+                if pwd == ADMIN_PASSWORD:
+                    ss.is_admin = True
+                    st.rerun()
+                else: st.error("Sai mật khẩu!")
+        else:
+            st.success("👨‍⚕️ Quyền Quản trị viên")
+            if st.button("Đăng xuất Admin"):
+                ss.is_admin = False
+                st.rerun()
+
+        st.markdown("---")
+        if st.button("🔄 Tạo hồ sơ mới"):
+            for k in list(st.session_state.keys()): del st.session_state[k]
+            st.rerun()
+
+    if ss.is_admin:
+        st.subheader("📊 Trang Quản trị & Xuất Báo cáo Excel")
+        records = doc_database_supabase()
+        if records:
+            df = pd.DataFrame(records)
+            st.dataframe(df[["ho_ten", "gioi_tinh", "dan_toc", "tinh_o", "diem_v1", "ket_luan_v1", "ket_luan_tong"]], use_container_width=True)
+            
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name='BaoCaoSangLoc', index=False)
+            
+            st.download_button(
+                label="📥 Tải xuống File Báo Cáo Excel Tổng Hợp",
+                data=output.getvalue(),
+                file_name=f"Bao_Cao_Thalassemia_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("Chưa có hồ sơ nào lưu trong database.")
+        st.markdown("---")
+
+    st.subheader("📋 1. Thông tin cá nhân & Địa bàn sinh sống")
+    c1, c2 = st.columns(2)
+    with c1:
+        ss.hoten = st.text_input("Họ và tên (*):", value=ss.hoten)
+        cs1, cs2 = st.columns(2)
+        with cs1: ss.gioitinh = st.selectbox("Giới tính:", ["Nữ", "Nam"], index=0 if ss.gioitinh == "Nữ" else 1)
+        with cs2: ss.ngaysinh = st.date_input("Ngày sinh:", value=ss.ngaysinh, min_value=date(1900,1,1), format="DD/MM/YYYY")
+        ss.dantoc = st.selectbox("Dân tộc:", DAN_TOC, index=DAN_TOC.index(ss.dantoc) if ss.dantoc in DAN_TOC else 0)
+        ss.sdt = st.text_input("Số điện thoại:", value=ss.sdt)
+    with c2:
+        ss.vung_o = st.selectbox("Vùng sinh sống:", VUNG_MIEN, index=VUNG_MIEN.index(ss.vung_o) if ss.vung_o in VUNG_MIEN else 0)
+        tinh_ds_o = TAT_CA_TINH if ss.vung_o == "Chọn vùng/miền" else ["Chọn Tỉnh/Thành phố"] + TINH_THEO_VUNG.get(ss.vung_o, [])
+        ss.tinh_o = st.selectbox("Tỉnh/Thành phố:", tinh_ds_o, index=tinh_ds_o.index(ss.tinh_o) if ss.tinh_o in tinh_ds_o else 0)
+        ss.do_cao = st.selectbox("🏔️ Độ cao sinh sống (WHO 2024):", ALTITUDE_OPTIONS, index=ALTITUDE_OPTIONS.index(ss.do_cao) if ss.do_cao in ALTITUDE_OPTIONS else 0)
+
+    st.markdown("---")
+    t1, t2, t3 = st.tabs(["VÒNG 1: Tiền sử & Dịch tễ", "VÒNG 2: Công thức máu", "VÒNG 3: Điện di Hb & Gen"])
+
+    with t1:
+        score_v1 = DIEM_DAN_TOC_VN.get(ss.dantoc, 0.5)
+        for idx, q_text in enumerate(CAU_HOI, 1):
+            col_q, col_a = st.columns([3.5, 1])
+            with col_q: st.write(q_text)
+            with col_a:
+                ans = st.radio(f"q_{idx}", ["Có", "Không"], key=f"q{idx}", horizontal=True, label_visibility="collapsed")
+                if ans == "Có": score_v1 += 1.0
+        ss.s1 = score_v1
+        if st.button("💾 Lưu vĩnh viễn Vòng 1", key="btn_v1"):
+            if luu_thong_tin_khach_hang(vong=1): st.success(f"Đã lưu thành công vào Database! Điểm V1: {ss.s1}")
+
+    with t2:
+        cmcv, cmch, chb, crbc, crdw = st.columns(5)
+        with cmcv: ss.mcv = st.number_input("MCV (fL):", value=ss.mcv, min_value=0.0, step=0.1)
+        with cmch: ss.mch = st.number_input("MCH (pg):", value=ss.mch, min_value=0.0, step=0.1)
+        with chb: ss.hb = st.number_input("Hemoglobin (g/dL):", value=ss.hb, min_value=0.0, step=0.1)
+        with crbc: ss.rbc = st.number_input("RBC (M/uL):", value=ss.rbc, min_value=0.0, step=0.01)
+        with crdw: ss.rdw = st.number_input("RDW (%):", value=ss.rdw, min_value=0.0, step=0.1)
+
+        s2_score, _, hb_hieuchinh = score_round2(ss.mcv, ss.mch, ss.hb, ss.rbc, ss.rdw, ss.gioitinh, ss.do_cao)
+        ss.s2 = s2_score
+        if ss.hb > 0: st.info(f"⚙️ Hb hiệu chỉnh theo độ cao: **{hb_hieuchinh:.2f} g/dL**")
+        if st.button("💾 Lưu vĩnh viễn Vòng 2", key="btn_v2"):
+            if luu_thong_tin_khach_hang(vong=2): st.success(f"Đã lưu Vòng 2 thành công vào Database! Điểm V2: {ss.s2}")
+
+    with t3:
+        ca, ca2, cf = st.columns(3)
+        with ca: ss.hba = st.number_input("HbA (%):", value=ss.hba, min_value=0.0, max_value=100.0)
+        with ca2: ss.hba2 = st.number_input("HbA2 (%):", value=ss.hba2, min_value=0.0, max_value=100.0)
+        with cf: ss.hbf = st.number_input("HbF (%):", value=ss.hbf, min_value=0.0, max_value=100.0)
+        ss.ketluan_r3 = st.text_area("Kết luận Vòng 3 / Gen:", value=ss.ketluan_r3)
+        if st.button("💾 Lưu vĩnh viễn Vòng 3", key="btn_v3"):
+            if luu_thong_tin_khach_hang(vong=3): st.success("Đã lưu Vòng 3 thành công!")
+
+if __name__ == "__main__":
+    main()
